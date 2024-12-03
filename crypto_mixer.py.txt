@@ -1,0 +1,141 @@
+from web3 import Web3
+import os
+
+# Connect to Sepolia Testnet using Infura
+INFURA_PROJECT_ID = '357ec5dea85f45bc9f3111c6a641a67b'  # Replace with your Infura project ID
+w3 = Web3(Web3.HTTPProvider(f'https://sepolia.infura.io/v3/{INFURA_PROJECT_ID}'))
+
+# Check connection
+if not w3.is_connected():
+    print("Failed to connect to Ethereum testnet")
+    exit()
+
+print("Connected to Ethereum Sepolia testnet")
+
+# Step 1: Generate some test accounts
+def generate_account():
+    account = w3.eth.account.create()
+    return account.address, account.key
+
+num_users = 3  # Number of participants
+accounts = [generate_account() for _ in range(num_users)]
+
+print("\nGenerated Accounts:")
+for i, (address, key) in enumerate(accounts):
+    print(f"User {i + 1} -> Address: {address}, Private Key: {key.hex()}")
+
+# Step 2: Assign some ETH to these accounts from your funded account
+FUNDED_ACCOUNT_ADDRESS = '0x688a32FA4a1aa6438ED7cC2a5B52dF48d4c25dC9'
+FUNDED_ACCOUNT_PRIVATE_KEY = os.getenv('FUNDED_ACCOUNT_PRIVATE_KEY')
+
+# Check if private key was loaded successfully
+if not FUNDED_ACCOUNT_PRIVATE_KEY:
+    print("Private key not found! Make sure to set the environment variable.")
+    exit()
+
+def fund_accounts():
+    for address, _ in accounts:
+        gas_price = w3.eth.gas_price
+        txn_value = w3.to_wei(0.01, 'ether')  # Increased funding amount
+        txn_cost = 21000 * gas_price
+
+        # Ensure the funded account has enough to cover the transaction and gas
+        if txn_value + txn_cost > w3.eth.get_balance(FUNDED_ACCOUNT_ADDRESS):
+            print(f"Insufficient funds in funded account to send to {address}.")
+            # Calculate the shortfall
+            shortfall = (txn_value + txn_cost) - w3.eth.get_balance(FUNDED_ACCOUNT_ADDRESS)
+            print(f"Need an additional {w3.from_wei(shortfall, 'ether')} ETH to fund account {address}.")
+            continue
+
+        txn = {
+            'to': address,
+            'value': txn_value,
+            'gas': 21000,
+            'gasPrice': gas_price,
+            'nonce': w3.eth.get_transaction_count(FUNDED_ACCOUNT_ADDRESS),
+        }
+        signed_txn = w3.eth.account.sign_transaction(txn, private_key=FUNDED_ACCOUNT_PRIVATE_KEY)
+        try:
+            tx_hash = w3.eth.send_raw_transaction(signed_txn.raw_transaction)
+            print(f"Funding account {address} - Tx Hash: {tx_hash.hex()}")
+            w3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
+        except Exception as e:
+            print(f"Failed to fund account {address}: {str(e)}")
+
+fund_accounts()
+
+# Step 3: Simulate Mixing - Collect ETH into a central address and redistribute
+mixing_address, mixing_key = generate_account()  # Central address for mixing
+
+# Collect funds to mixing address
+def collect_funds():
+    for address, key in accounts:
+        balance = w3.eth.get_balance(address)
+        print(f"Balance of {address}: {w3.from_wei(balance, 'ether')} ETH")
+
+        # Calculate transaction cost to ensure enough balance is available
+        gas_price = w3.eth.gas_price
+        txn_cost = 21000 * gas_price
+        amount_to_send = balance - txn_cost - w3.to_wei(0.001, 'ether')  # Leave a little for gas
+
+        # Ensure that there's enough balance to send
+        if amount_to_send > 0:
+            print(f"Collecting {w3.from_wei(amount_to_send, 'ether')} ETH from {address} to mixing address {mixing_address}")
+            txn = {
+                'to': mixing_address,
+                'value': amount_to_send,
+                'gas': 21000,
+                'gasPrice': gas_price,
+                'nonce': w3.eth.get_transaction_count(address),
+            }
+            signed_txn = w3.eth.account.sign_transaction(txn, private_key=key)
+            try:
+                tx_hash = w3.eth.send_raw_transaction(signed_txn.raw_transaction)
+                print(f"Collecting from {address} to mixing address - Tx Hash: {tx_hash.hex()}")
+                w3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
+            except Exception as e:
+                print(f"Failed to collect from {address}: {str(e)}")
+        else:
+            print(f"Not enough funds in {address} to cover transaction and gas. Skipping.")
+
+collect_funds()
+
+# Check the total balance of the mixing address after collecting funds
+mixed_balance = w3.eth.get_balance(mixing_address)
+print(f"Total balance in mixing account {mixing_address}: {w3.from_wei(mixed_balance, 'ether')} ETH")
+
+# Redistribute funds to new addresses
+def redistribute_funds():
+    mixed_balance = w3.eth.get_balance(mixing_address)
+    print(f"Mixed Balance before redistribution: {w3.from_wei(mixed_balance, 'ether')} ETH")
+    
+    if mixed_balance > 0:
+        output_addresses = [generate_account() for _ in range(num_users)]
+        output_amount = mixed_balance // num_users  # Amount to send to each user
+
+        for i, (address, _) in enumerate(output_addresses):
+            txn_cost = 21000 * w3.eth.gas_price
+
+            # Ensure enough funds to cover transaction and gas
+            if output_amount < txn_cost + w3.to_wei(0.001, 'ether'):  # Leave a little for gas
+                print(f"Not enough funds to send to {address}. Skipping.")
+                continue
+            
+            txn = {
+                'to': address,
+                'value': output_amount - w3.to_wei(0.001, 'ether'),  # Leave a little for gas
+                'gas': 21000,
+                'gasPrice': w3.eth.gas_price,
+                'nonce': w3.eth.get_transaction_count(mixing_address),
+            }
+            signed_txn = w3.eth.account.sign_transaction(txn, private_key=mixing_key)
+            try:
+                tx_hash = w3.eth.send_raw_transaction(signed_txn.raw_transaction)
+                print(f"Redistributing to {address} - Tx Hash: {tx_hash.hex()}")
+                w3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
+            except Exception as e:
+                print(f"Failed to redistribute to {address}: {str(e)}")
+
+redistribute_funds()
+
+print("\nMixing Complete. Funds have been redistributed.")
